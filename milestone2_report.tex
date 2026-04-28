@@ -1,0 +1,311 @@
+\documentclass[conference]{IEEEtran}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{cite}
+\usepackage{amsmath}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{mdframed}
+\usepackage{enumitem}
+
+\hypersetup{colorlinks=false}
+
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+
+\lstset{
+    basicstyle=\ttfamily\small,
+    breaklines=true,
+    frame=single,
+    backgroundcolor=\color{gray!10},
+    keywordstyle=\bfseries,
+    language=Python
+}
+
+\begin{document}
+
+\title{AQI Predictor Project\\
+{\large Milestone 2 Report: Feature Pipeline Script}}
+
+\author{
+\IEEEauthorblockN{Ayesha Salahuddin}
+\IEEEauthorblockA{
+GitHub: github.com/ayeshasalahuddin/AQI-predictor\\
+}
+}
+
+\maketitle
+
+\begin{abstract}
+This report documents the design, implementation, and verification of the Feature Pipeline for the Pearls AQI Predictor system. The feature pipeline is the foundational data layer of the end-to-end machine learning system. It fetches real-time Air Quality Index (AQI) and meteorological data from the AQICN API for Karachi, engineers time-based and derived features, and stores them as versioned rows in the Hopsworks Feature Store. Successful execution of this pipeline was verified by inserting live data with AQI value 161 into the cloud Feature Store, with a materialization job confirmed as launched on the Hopsworks platform.
+\end{abstract}
+
+\begin{IEEEkeywords}
+AQI, feature pipeline, feature store, Hopsworks, AQICN, feature engineering, machine learning, air quality
+\end{IEEEkeywords}
+
+% ─── I. Introduction ───────────────────────────────────────────────────────────
+\section{Introduction}
+
+Milestone 2 builds the core data layer of the AQI Predictor system: the Feature Pipeline. This pipeline is responsible for collecting raw environmental data, transforming it into ML-ready features, and persisting it in a centralized Feature Store for downstream model training and inference.
+
+The feature pipeline is the most critical component of the system because every subsequent milestone — model training, automated scheduling, and the web dashboard — depends entirely on the quality and availability of data produced here. Without a reliable, well-engineered feature pipeline, no machine learning can take place.
+
+This milestone achieves the following:
+\begin{itemize}[leftmargin=1.5em, itemsep=2pt]
+    \item Live data ingestion from the AQICN pollution API
+    \item Feature engineering including time-based and categorical features
+    \item Secure credential management via environment variables
+    \item Persistent cloud storage via the Hopsworks Feature Store
+    \item End-to-end verification with real Karachi AQI data
+\end{itemize}
+
+% ─── II. System Architecture ───────────────────────────────────────────────────
+\section{System Architecture}
+
+The feature pipeline sits at the entry point of the full ML system architecture. Fig. 1 illustrates the data flow from the external API through the pipeline to the Feature Store.
+
+\begin{center}
+\begin{tabular}{ccccc}
+\textbf{AQICN API}&$\rightarrow$& \textbf{feature\_pipeline.py} & $\rightarrow$ & \textbf{Hopsworks} \\
+(Raw data) & & (Fetch + Engineer) & & (Feature Store) \\
+\end{tabular}
+\end{center}
+
+\vspace{6pt}
+The pipeline is designed to be stateless and idempotent — it can be run at any time, any number of times, and will always produce a correctly formatted row for the Feature Store. This property is essential for the automated hourly scheduling that will be implemented in Milestone 6.
+
+% ─── III. Implementation ───────────────────────────────────────────────────────
+\section{Implementation}
+
+\subsection{Script Structure}
+
+The feature pipeline is implemented as a single Python script \texttt{feature\_pipeline.py} organized into four functions:
+
+\begin{itemize}[leftmargin=1.5em, itemsep=2pt]
+    \item \texttt{fetch\_raw\_data()} — calls the AQICN API and extracts pollutant and weather values
+    \item \texttt{engineer\_features(raw)} — computes all engineered features from raw data
+    \item \texttt{get\_aqi\_category(aqi)} — maps numeric AQI to a health category string
+    \item \texttt{store\_to\_feature\_store(features)} — connects to Hopsworks and inserts the feature row
+\end{itemize}
+
+\subsection{Data Ingestion}
+
+Raw data is fetched from the AQICN API endpoint:
+
+\begin{lstlisting}
+url = f"https://api.waqi.info/feed/{CITY}/?token={TOKEN}"
+response = requests.get(url)
+data = response.json()
+\end{lstlisting}
+
+The API returns a nested JSON object. The \texttt{iaqi} field contains individual pollutant readings. Each pollutant value is extracted with a safe fallback to \texttt{None} if not available:
+
+\begin{lstlisting}
+iaqi = d.get("iaqi", {})
+raw = {
+"aqi":         d.get("aqi", None),
+"pm25":        iaqi.get("pm25",{}).get("v", None),
+"pm10":        iaqi.get("pm10",{}).get("v", None),
+"no2":         iaqi.get("no2", {}).get("v", None),
+"o3":          iaqi.get("o3",  {}).get("v", None),
+"temperature": iaqi.get("t",   {}).get("v", None),
+"humidity":    iaqi.get("h",   {}).get("v", None),
+"wind":        iaqi.get("w",   {}).get("v", None),
+"pressure":    iaqi.get("p",   {}).get("v", None),
+}
+\end{lstlisting}
+
+\subsection{Feature Engineering}
+
+Feature engineering transforms raw API values into structured ML inputs. Two categories of features are computed:
+
+\subsubsection{Time-Based Features}
+Time-based features capture cyclical patterns in air quality. Research shows AQI varies significantly by hour of day (rush hour peaks), day of week (weekday vs weekend traffic), and month (seasonal weather patterns).
+
+\begin{itemize}[leftmargin=1.5em, itemsep=2pt]
+    \item \texttt{hour} — hour of day (0--23)
+    \item \texttt{day\_of\_week} — day of week (0=Monday, 6=Sunday)
+    \item \texttt{month} — month of year (1--12)
+    \item \texttt{is\_weekend} — binary flag (1 if Saturday or Sunday)
+\end{itemize}
+
+\subsubsection{Pollutant Features}
+All raw pollutant readings are cast to float with a zero fallback for missing values, ensuring the Feature Store always receives a consistent schema:
+
+\begin{itemize}[leftmargin=1.5em, itemsep=2pt]
+    \item \texttt{aqi} — overall Air Quality Index
+    \item \texttt{pm25} — fine particulate matter ($\leq$2.5$\mu$m)
+    \item \texttt{pm10} — coarse particulate matter ($\leq$10$\mu$m)
+    \item \texttt{no2} — nitrogen dioxide
+    \item \texttt{o3} — ground-level ozone
+    \item \texttt{so2} — sulphur dioxide
+    \item \texttt{co} — carbon monoxide
+    \item \texttt{temperature} — ambient temperature ($^\circ$C)
+    \item \texttt{humidity} — relative humidity (\%)
+    \item \texttt{wind} — wind speed (m/s)
+    \item \texttt{pressure} — atmospheric pressure (hPa)
+\end{itemize}
+
+\subsubsection{AQI Category Feature}
+A categorical feature \texttt{aqi\_category} is derived from the numeric AQI using the standard US EPA scale:
+
+\begin{center}
+\begin{tabular}{|l|l|}
+\hline
+\textbf{AQI Range} & \textbf{Category} \\
+\hline
+0 -- 50 & good \\
+51 -- 100 & moderate \\
+101 -- 150 & unhealthy\_sensitive \\
+151 -- 200 & unhealthy \\
+201 -- 300 & very\_unhealthy \\
+301+ & hazardous \\
+\hline
+\end{tabular}
+\end{center}
+
+\subsection{Hopsworks Feature Store Integration}
+
+The pipeline connects to Hopsworks using the Python SDK and inserts features into a versioned Feature Group:
+
+\begin{lstlisting}
+project = hopsworks.login(
+    api_key_value=HOPSWORKS_API_KEY,
+    project="PredictorAQI"
+)
+fs = project.get_feature_store()
+
+fg = fs.get_or_create_feature_group(
+    name="aqi_features",
+    version=1,
+    primary_key=["city", "timestamp"],
+    description="Hourly AQI features for Karachi",
+    event_time="timestamp",
+)
+fg.insert(df)
+\end{lstlisting}
+
+The \texttt{get\_or\_create\_feature\_group()} call is idempotent — on first run it creates the Feature Group with the correct schema; on subsequent runs it retrieves the existing group and appends the new row. The primary key is a composite of \texttt{city} and \texttt{timestamp}, ensuring no duplicate entries.
+
+\subsection{Credential Management}
+
+All API keys are stored in a \texttt{.env} file excluded from version control via \texttt{.gitignore}. The \texttt{python-dotenv} library loads them at runtime:
+
+\begin{lstlisting}
+load_dotenv()
+AQICN_TOKEN = os.getenv("AQICN_TOKEN")
+HOPSWORKS_API_KEY = os.getenv("HOPSWORKS_API_KEY")
+\end{lstlisting}
+
+This ensures credentials are never exposed in the codebase or on GitHub.
+
+% ─── IV. Technical Challenges ──────────────────────────────────────────────────
+\section{Technical Challenges and Resolutions}
+
+Several Windows-specific issues were encountered and resolved during implementation:
+
+\begin{center}
+\begin{tabular}{|L{2.5cm}|L{2.5cm}|L{2.5cm}|}
+\hline
+\textbf{Issue} & \textbf{Cause} & \textbf{Resolution} \\
+\hline
+\texttt{/tmp} path not found & Hopsworks uses Linux path hardcoded & Created \texttt{C:\textbackslash tmp} and set \texttt{TEMP} env variable \\
+\hline
+\texttt{confluent-kafka} missing & Not included in default install & Installed via pip separately \\
+\hline
+Version mismatch 4.8.1 vs 4.7.2 & Latest hopsworks client ahead of backend & Downgraded to \texttt{hopsworks==4.7.*} \\
+\hline
+pandas build failure & Missing Ninja/CMake build tools on Windows & Used Anaconda pre-compiled binaries \\
+\hline
+\end{tabular}
+\end{center}
+
+% ─── V. Results ────────────────────────────────────────────────────────────────
+\section{Results and Verification}
+
+The pipeline was executed successfully and produced the following terminal output:
+
+\begin{mdframed}[backgroundcolor=gray!10, linecolor=black, linewidth=1pt, leftline=true, rightline=false, topline=false, bottomline=false]
+\ttfamily\footnotesize
+AQI Feature Pipeline Starting...\\
+Fetched AQI: 161 at 2026-04-28 21:07:39\\
+aqi: 161.0 | pm25: 161.0 | temperature: 31.0\\
+humidity: 3.0 | wind: 5.1 | pressure: 1016.0\\
+hour: 21 | day\_of\_week: 1 | month: 4\\
+is\_weekend: 0 | aqi\_category: unhealthy\\
+Connecting to Hopsworks...\\
+Python Engine initialized.\\
+Logged in to project PredictorAQI\\
+Uploading Dataframe: 100\% --- Rows 1/1\\
+Job started: aqi\_features\_1\_offline\_fg\_materialization\\
+Successfully inserted row into Feature Store.\\
+Pipeline complete.
+\end{mdframed}
+
+\vspace{6pt}
+The Feature Group \texttt{aqi\_features} was created in the Hopsworks Feature Store under project \texttt{PredictorAQI}. The materialization job was confirmed as launched, meaning the data is being persisted to offline storage for use in model training.
+
+Key observations from the output:
+\begin{itemize}[leftmargin=1.5em, itemsep=2pt]
+    \item AQI of 161 places Karachi in the \textbf{Unhealthy} category
+    \item Humidity reading of 3\% is unusually low, suggesting a dry desert wind event
+    \item PM2.5 equals AQI (161), indicating fine particulate matter is the dominant pollutant
+    \item All time-based features were computed correctly from UTC timestamp
+\end{itemize}
+
+% ─── VI. Feature Summary ───────────────────────────────────────────────────────
+\section{Feature Summary}
+
+The table below lists all features stored in the Hopsworks Feature Store after Milestone 2:
+
+\begin{center}
+\begin{tabular}{|l|l|l|}
+\hline
+\textbf{Feature} & \textbf{Type} & \textbf{Source} \\
+\hline
+aqi & float & AQICN API \\
+pm25 & float & AQICN API \\
+pm10 & float & AQICN API \\
+no2 & float & AQICN API \\
+o3 & float & AQICN API \\
+so2 & float & AQICN API \\
+co & float & AQICN API \\
+temperature & float & AQICN API \\
+humidity & float & AQICN API \\
+wind & float & AQICN API \\
+pressure & float & AQICN API \\
+hour & int & Engineered \\
+day\_of\_week & int & Engineered \\
+month & int & Engineered \\
+is\_weekend & int & Engineered \\
+aqi\_category & string & Engineered \\
+timestamp & datetime & System \\
+city & string & Config \\
+\hline
+\end{tabular}
+\end{center}
+
+% ─── VII. Next Steps ───────────────────────────────────────────────────────────
+\section{Next Steps — Milestone 3}
+
+Milestone 3 will implement the Historical Data Backfill. The feature pipeline will be run across a range of past dates (6--12 months) to populate the Feature Store with thousands of historical rows. This historical dataset forms the training data for all ML models in Milestone 5.
+
+Key tasks in Milestone 3:
+\begin{itemize}[leftmargin=1.5em, itemsep=2pt]
+    \item Write \texttt{backfill.py} script that loops over a date range
+    \item Use the AQICN historical feed endpoint for past data
+    \item Insert all historical rows into the existing \texttt{aqi\_features} Feature Group
+    \item Verify thousands of rows appear in the Hopsworks Data Preview
+\end{itemize}
+
+% ─── VIII. Conclusion ──────────────────────────────────────────────────────────
+\section{Conclusion}
+
+Milestone 2 successfully delivered a fully functional, cloud-connected feature pipeline for the AQI Predictor system. The pipeline fetches live pollution and weather data, engineers 18 structured features, and persists them to the Hopsworks Feature Store. All Windows-specific compatibility issues were resolved. The system is now ready for historical backfilling in Milestone 3 and model training in Milestone 5.
+
+\end{document}
