@@ -1,0 +1,7 @@
+hopsworks==4.7.4
+pandas
+numpy
+scikit-learn
+requests
+python-dotenv
+joblib
