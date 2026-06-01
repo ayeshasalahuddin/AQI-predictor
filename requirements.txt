@@ -1,8 +1,8 @@
-hopsworks==4.7.4
+hopsworks[python]==4.7.4
 pandas
 numpy
 scikit-learn
 requests
 python-dotenv
 joblib
-pyarrow
+confluent-kafka
