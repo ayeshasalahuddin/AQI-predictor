@@ -6,3 +6,5 @@ requests
 python-dotenv
 joblib
 confluent-kafka
+streamlit
+plotly
