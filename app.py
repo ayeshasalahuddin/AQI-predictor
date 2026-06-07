@@ -43,7 +43,15 @@ def load_model_and_data():
 
     # Load model from registry
     mr = project.get_model_registry()
-    model = mr.get_model("aqi_best_model", version=1)
+    # Load the LATEST version of the production model so the dashboard always
+    # serves the freshest model produced by the daily training pipeline.
+    # Fall back to version 1 if the version lookup fails for any reason.
+    try:
+        all_versions = mr.get_models("aqi_best_model")
+        latest_version = max(m.version for m in all_versions)
+        model = mr.get_model("aqi_best_model", version=latest_version)
+    except Exception:
+        model = mr.get_model("aqi_best_model", version=1)
     model_dir = model.download()
     rf = joblib.load(os.path.join(model_dir, "model.pkl"))
     scaler = joblib.load(os.path.join(model_dir, "scaler.pkl"))
