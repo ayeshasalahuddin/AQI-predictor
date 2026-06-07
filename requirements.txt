@@ -8,3 +8,4 @@ joblib
 confluent-kafka
 streamlit
 plotly
+torch
